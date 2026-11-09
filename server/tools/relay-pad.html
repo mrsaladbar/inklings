@@ -101,7 +101,7 @@ const toPoint = (e) => {
 };
 const flush = (done) => {
   if (!current || (!pending.length && !done)) return;
-  send({ type: "stroke", strokeId: current.strokeId, points: pending, color: current.color, size: current.size, done });
+  send({ type: "stroke", strokeId: current.strokeId, points: pending, color: current.color, size: current.size, done, brush: "marker" });
   pending = [];
 };
 pad.addEventListener("pointerdown", (e) => {

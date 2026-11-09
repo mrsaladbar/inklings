@@ -71,8 +71,11 @@ This folder is its **own Gradle build** (own wrapper, own versions: Ktor 3.6.1, 
 - server → a phone that just connected `canvas_snapshot` — `{"type":"canvas_snapshot","strokes":[<stroke>,...]}`,
   oldest first, each with all its points so far (`done:false` = still being drawn, more batches follow).
 
-Not in the protocol, so not sent: brush type (other phones draw everything with the Pressure Pen),
-pen pressure, and transparency.
+`stroke` may also carry an optional `"brush"`: `"pressure_pen"`, `"marker"`, `"highlighter"` or
+`"dashed_line"`. Left out or unknown → the app's default pen.
+
+Not in the protocol, so not sent: pen pressure (pressure brushes draw evenly on other phones)
+and transparency.
 
 ## Tested (2026-11-04)
 - Two Node clients on `/relay`: messages reach the other client, not the sender.

@@ -93,6 +93,7 @@ enum class ErrorCode {
     NOT_HOST,
     NOT_DRAWER,
     BAD_MESSAGE,
+    NOT_ENOUGH_PLAYERS,   // start_game with fewer than MIN_PLAYERS_TO_START
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,8 @@ sealed class ClientMessage {
      * One stroke (finger down to finger up) is several batches with the same
      * strokeId. Each point is [x, y, msSinceStrokeStart], x and y in 0..1.
      * The last batch has done = true. size is 1, 2 or 3 (thin, medium, thick).
+     * brush is optional: "pressure_pen", "marker", "highlighter" or
+     * "dashed_line". Left out (or unknown) means the app's default pen.
      * Eraser for MVP: a stroke in the background color.
      */
     @Serializable @SerialName("stroke")
@@ -136,6 +139,7 @@ sealed class ClientMessage {
         val color: String,
         val size: Int,
         val done: Boolean,
+        val brush: String? = null,
     ) : ClientMessage()
 
     /** Drawer taps undo. Removes the whole last stroke. */
@@ -146,7 +150,11 @@ sealed class ClientMessage {
     @Serializable @SerialName("clear")
     data object Clear : ClientMessage()
 
-    /** Any chat message. This is also how guessing works. */
+    /**
+     * Any chat message. This is also how guessing works.
+     * The drawer can't chat during their turn: the app hides chat for them,
+     * and the server ignores any chat the drawer sends anyway (no error).
+     */
     @Serializable @SerialName("chat")
     data class Chat(val text: String) : ClientMessage()
 
@@ -206,6 +214,7 @@ sealed class ServerMessage {
         val color: String,
         val size: Int,
         val done: Boolean,
+        val brush: String? = null,
     ) : ServerMessage()
 
     /**
@@ -263,7 +272,7 @@ sealed class ServerMessage {
 // ---------------------------------------------------------------------------
 
 /** Server: turn a drawer's stroke into the relay message. */
-fun ClientMessage.Stroke.toRelay() = ServerMessage.Stroke(strokeId, points, color, size, done)
+fun ClientMessage.Stroke.toRelay() = ServerMessage.Stroke(strokeId, points, color, size, done, brush)
 
 /** Phone: convert a server stroke back into the shape the canvas code uses. */
-fun ServerMessage.Stroke.toClientShape() = ClientMessage.Stroke(strokeId, points, color, size, done)
+fun ServerMessage.Stroke.toClientShape() = ClientMessage.Stroke(strokeId, points, color, size, done, brush)

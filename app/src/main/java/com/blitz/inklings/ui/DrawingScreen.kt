@@ -41,6 +41,7 @@ import androidx.ink.strokes.MutableStrokeInputBatch
 import androidx.ink.strokes.Stroke
 import com.blitz.inklings.net.RemoteStroke
 import com.blitz.inklings.net.StrokeRelay
+import com.blitz.inklings.net.brushNameFor
 import com.blitz.inklings.net.sizeLevelFor
 import com.blitz.inklings.net.toHex
 import com.blitz.inklings.net.toInkStroke
@@ -200,6 +201,7 @@ fun DrawingScreen() {
                                         liveRelayId[0] = relay.beginStroke(
                                             color = Color(latestBrush.colorIntArgb).toHex(),
                                             size = sizeLevelFor(latestBrush.size),
+                                            brush = brushNameFor(latestBrush.family),
                                         )
                                         addInput(stroke, change.position, change.uptimeMillis)
                                         liveStroke = stroke
@@ -285,6 +287,7 @@ fun DrawingScreen() {
                             relay.sendWholeStroke(
                                 color = Color(stroke.brush.colorIntArgb).toHex(),
                                 size = sizeLevelFor(stroke.brush.size),
+                                brush = brushNameFor(stroke.brush.family),
                                 points = stroke.toProtocolPoints(canvasSize),
                             )
                         }
@@ -325,4 +328,4 @@ private fun wasStreamedLive(stroke: Stroke): Boolean {
 private class RemoteInk(val pointCount: Int, val canvas: IntSize, val stroke: Stroke?)
 
 private fun ServerMessage.Stroke.toRemoteStroke() =
-    RemoteStroke(strokeId, color, size, points, done)
+    RemoteStroke(strokeId, color, size, points, done, brush)

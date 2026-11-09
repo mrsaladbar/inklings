@@ -93,7 +93,7 @@ class StrokeRelay(
     // --- sending ----------------------------------------------------------------------
 
     /** A local stroke being streamed: its look, plus points not sent yet. */
-    private class Outgoing(val color: String, val size: Int) {
+    private class Outgoing(val color: String, val size: Int, val brush: String?) {
         val pending = ArrayList<List<Float>>()
     }
 
@@ -109,9 +109,9 @@ class StrokeRelay(
     }
 
     /** Start a new local stroke. Returns its strokeId for [streamPoints] / [endStroke]. */
-    fun beginStroke(color: String, size: Int): Int {
+    fun beginStroke(color: String, size: Int, brush: String?): Int {
         val id = nextStrokeId++
-        active[id] = Outgoing(color, size)
+        active[id] = Outgoing(color, size, brush)
         return id
     }
 
@@ -133,9 +133,9 @@ class StrokeRelay(
     }
 
     /** Send a stroke that wasn't streamed live (stylus) as one finished batch. */
-    fun sendWholeStroke(color: String, size: Int, points: List<List<Float>>) {
+    fun sendWholeStroke(color: String, size: Int, brush: String?, points: List<List<Float>>) {
         if (points.isEmpty()) return
-        sendMessage(ClientMessage.Stroke(nextStrokeId++, points, color, size, done = true))
+        sendMessage(ClientMessage.Stroke(nextStrokeId++, points, color, size, done = true, brush = brush))
     }
 
     fun sendClear() = sendMessage(ClientMessage.Clear)
@@ -143,7 +143,9 @@ class StrokeRelay(
     fun sendUndo() = sendMessage(ClientMessage.Undo)
 
     private fun send(id: Int, stroke: Outgoing, done: Boolean) {
-        sendMessage(ClientMessage.Stroke(id, stroke.pending.toList(), stroke.color, stroke.size, done))
+        sendMessage(
+            ClientMessage.Stroke(id, stroke.pending.toList(), stroke.color, stroke.size, done, stroke.brush)
+        )
         stroke.pending.clear()
     }
 

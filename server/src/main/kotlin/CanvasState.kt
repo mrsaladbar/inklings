@@ -31,6 +31,7 @@ class CanvasState {
             color = batch.color,
             size = batch.size.coerceIn(1, 3),
             done = batch.done,
+            brush = batch.brush,
         )
         val existing = strokes[serverId]
         strokes[serverId] = if (existing == null) {

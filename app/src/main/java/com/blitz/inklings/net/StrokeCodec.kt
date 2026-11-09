@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.IntSize
 import androidx.ink.brush.Brush
+import androidx.ink.brush.BrushFamily
 import androidx.ink.brush.InputToolType
 import androidx.ink.brush.StockBrushes
 import androidx.ink.brush.compose.createWithComposeColor
@@ -13,8 +14,24 @@ import com.blitz.inklings.ui.brushSizes
 
 /*
  * Converts between what the canvas uses (ink strokes, pixels, Compose colors, brush widths)
- * and what protocol v0 sends (points in 0..1, "#RRGGBB", size 1/2/3).
+ * and what protocol v0 sends (points in 0..1, "#RRGGBB", size 1/2/3, brush name).
  */
+
+/** Protocol brush names for the toolbar's stock brushes. */
+private val brushNames = listOf(
+    StockBrushes.pressurePen() to "pressure_pen",
+    StockBrushes.marker() to "marker",
+    StockBrushes.highlighter() to "highlighter",
+    StockBrushes.dashedLine() to "dashed_line",
+)
+
+/** Protocol brush name for a brush family, or null if it isn't one of ours. */
+fun brushNameFor(family: BrushFamily): String? =
+    brushNames.firstOrNull { it.first == family }?.second
+
+/** Brush family for a protocol brush name. Missing or unknown means the Pressure Pen. */
+fun brushFamilyFor(name: String?): BrushFamily =
+    brushNames.firstOrNull { it.second == name }?.first ?: StockBrushes.pressurePen()
 
 /** A pixel position on a canvas of [canvas] size as a protocol point [x, y, ms], x/y in 0..1. */
 fun toProtocolPoint(x: Float, y: Float, elapsedMs: Long, canvas: IntSize): List<Float> = listOf(
@@ -55,12 +72,13 @@ data class RemoteStroke(
     val size: Int,
     val points: List<List<Float>>,
     val done: Boolean,
+    val brush: String? = null,
 )
 
 /**
  * Builds an ink stroke from a remote stroke for a canvas of [canvas] size, or null if there
- * is nothing drawable yet. The protocol has no brush type, so remote strokes all use the
- * Pressure Pen (the app's default) without pressure data.
+ * is nothing drawable yet. Uses the stroke's brush if it has one, otherwise the Pressure
+ * Pen. The protocol carries no pen pressure, so pressure-based brushes draw evenly.
  */
 fun RemoteStroke.toInkStroke(canvas: IntSize): Stroke? {
     if (canvas.width == 0 || canvas.height == 0) return null
@@ -82,11 +100,11 @@ fun RemoteStroke.toInkStroke(canvas: IntSize): Stroke? {
         }
     }
     if (batch.size == 0) return null
-    val brush = Brush.createWithComposeColor(
-        family = StockBrushes.pressurePen(),
+    val inkBrush = Brush.createWithComposeColor(
+        family = brushFamilyFor(brush),
         color = colorFromHex(color),
         size = widthForLevel(size),
         epsilon = 0.1f,
     )
-    return runCatching { Stroke(brush, batch) }.getOrNull()
+    return runCatching { Stroke(inkBrush, batch) }.getOrNull()
 }

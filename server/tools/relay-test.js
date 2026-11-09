@@ -84,7 +84,7 @@ const cGot = [];
 let a;
 const parse = (arr) => arr.map((t) => JSON.parse(t));
 const stroke = (points, done) =>
-  JSON.stringify({ type: "stroke", strokeId: 1, points, color: "#1565C0", size: 2, done });
+  JSON.stringify({ type: "stroke", strokeId: 1, points, color: "#1565C0", size: 2, done, brush: "marker" });
 
 const b = connect("B", (t) => bGot.push(t), () => {
   // B is connected (and will have received its own empty snapshot). Now connect A.
@@ -119,7 +119,8 @@ setTimeout(() => {
     ["B saw 3 stroke batches", bStrokes.length === 3],
     ["all 3 batches share one strokeId", new Set(bStrokes.map((m) => m.strokeId)).size === 1],
     ["only the last batch has done = true", bStrokes.map((m) => m.done).join() === "false,false,true"],
-    ["color and size came through", bStrokes.every((m) => m.color === "#1565C0" && m.size === 2)],
+    ["color, size and brush came through", bStrokes.every((m) => m.color === "#1565C0" && m.size === 2 && m.brush === "marker")],
+    ["C snapshot keeps the brush", snapStroke?.brush === "marker"],
     ["A got no echo of its own strokes", !aMsgs.some((m) => m.type === "stroke")],
     ["A got BAD_MESSAGE for the broken message", aMsgs.some((m) => m.type === "error" && m.code === "BAD_MESSAGE")],
     ["C snapshot has the whole stroke (4 points, done)", snapStroke?.points.length === 4 && snapStroke.done === true],
