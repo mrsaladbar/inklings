@@ -27,7 +27,9 @@ import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import androidx.ink.authoring.compose.InProgressStrokes
 import androidx.ink.brush.Brush
 import androidx.ink.brush.InputToolType
@@ -37,7 +39,14 @@ import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.InProgressStroke
 import androidx.ink.strokes.MutableStrokeInputBatch
 import androidx.ink.strokes.Stroke
+import com.blitz.inklings.net.RemoteStroke
 import com.blitz.inklings.net.StrokeRelay
+import com.blitz.inklings.net.sizeLevelFor
+import com.blitz.inklings.net.toHex
+import com.blitz.inklings.net.toInkStroke
+import com.blitz.inklings.net.toProtocolPoint
+import com.blitz.inklings.net.toProtocolPoints
+import it.inkorporate.protocol.ServerMessage
 
 @Composable
 fun DrawingScreen() {
@@ -59,47 +68,49 @@ fun DrawingScreen() {
 
     val canvasStrokeRenderer = remember { CanvasStrokeRenderer.create() }
 
-    // Remote strokes still being streamed in, keyed by the sender's stroke id. Each is
-    // rebuilt as points arrive so a remote drawing appears live, point by point. Finished
-    // remote strokes move into finishedStrokes.
-    var remoteStrokes by remember { mutableStateOf<Map<String, Stroke>>(emptyMap()) }
-    // The brush + accumulated input batch backing each remote in-progress stroke.
-    val remoteBuilders = remember { mutableMapOf<String, RemoteStrokeBuilder>() }
+    // Size of the drawing area in pixels. Protocol points are 0..1, so this is what turns
+    // them back into positions on this phone's screen.
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
 
-    // Stroke relay: live streaming in both directions, with catch-up on connect.
+    // Strokes from other phones, oldest first, kept as protocol data (0..1 points) so they
+    // can be redrawn correctly whatever this canvas's size is. A stroke still being drawn
+    // has done = false and grows as batches arrive.
+    var remoteStrokes by remember { mutableStateOf<List<RemoteStroke>>(emptyList()) }
+    // Ink strokes built from remoteStrokes, reused until a stroke gets new points or the
+    // canvas size changes, so each frame doesn't rebuild every stroke.
+    val remoteInkCache = remember { HashMap<Int, RemoteInk>() }
+
+    // Stroke relay (protocol v0): live streaming in both directions, catch-up on connect.
     val relay = remember {
         StrokeRelay(listener = object : StrokeRelay.RelayListener {
-            override fun onSnapshot(strokes: List<Stroke>) {
-                // Replace the canvas with the server's current state.
-                finishedStrokes = strokes
-                remoteStrokes = emptyMap()
-                remoteBuilders.clear()
+            override fun onSnapshot(strokes: List<ServerMessage.Stroke>) {
+                // Replace remote strokes with the server's copy of the canvas.
+                remoteStrokes = strokes.map { it.toRemoteStroke() }
+                remoteInkCache.clear()
             }
 
-            override fun onRemoteBegin(id: String, brush: Brush) {
-                remoteBuilders[id] = RemoteStrokeBuilder(brush)
+            override fun onRemoteStroke(batch: ServerMessage.Stroke) {
+                val i = remoteStrokes.indexOfFirst { it.strokeId == batch.strokeId }
+                remoteStrokes = if (i < 0) {
+                    remoteStrokes + batch.toRemoteStroke()
+                } else {
+                    remoteStrokes.toMutableList().also {
+                        val old = it[i]
+                        it[i] = old.copy(points = old.points + batch.points, done = batch.done)
+                    }
+                }
             }
 
-            override fun onRemotePoints(id: String, batch: MutableStrokeInputBatch) {
-                val builder = remoteBuilders[id] ?: return
-                builder.addAll(batch)
-                val stroke = builder.buildOrNull() ?: return
-                remoteStrokes = remoteStrokes + (id to stroke)
-            }
-
-            override fun onRemoteEnd(id: String, stroke: Stroke) {
-                val builder = remoteBuilders.remove(id)
-                // Prefer the stroke we rebuilt from streamed points; fall back to any
-                // inline/legacy stroke the message carried.
-                val finished = builder?.buildOrNull() ?: stroke
-                remoteStrokes = remoteStrokes - id
-                finishedStrokes = finishedStrokes + finished
+            override fun onUndo() {
+                val last = remoteStrokes.lastOrNull() ?: return
+                remoteStrokes = remoteStrokes.dropLast(1)
+                remoteInkCache.remove(last.strokeId)
             }
 
             override fun onClear() {
                 finishedStrokes = emptyList()
-                remoteStrokes = emptyMap()
-                remoteBuilders.clear()
+                remoteStrokes = emptyList()
+                remoteInkCache.clear()
             }
         })
     }
@@ -114,7 +125,7 @@ fun DrawingScreen() {
     // Id of the local stroke currently being streamed to the relay (finger strokes only,
     // since the loupe/manual path that gives us live points is finger-only). Null when no
     // finger stroke is in flight.
-    val liveRelayId = remember { arrayOfNulls<String>(1) }
+    val liveRelayId = remember { arrayOfNulls<Int>(1) }
     var loupeFocus by remember { mutableStateOf(Offset.Zero) }
     var loupeFrame by remember { mutableIntStateOf(0) }
     val loupeZonePx = with(LocalDensity.current) { (LOUPE_SIZE + LOUPE_MARGIN * 2).toPx() }
@@ -136,8 +147,8 @@ fun DrawingScreen() {
                 },
                 onClear = {
                     finishedStrokes = emptyList()
-                    remoteStrokes = emptyMap()
-                    remoteBuilders.clear()
+                    remoteStrokes = emptyList()
+                    remoteInkCache.clear()
                     relay.sendClear()
                 }
             )
@@ -147,6 +158,7 @@ fun DrawingScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .onSizeChanged { canvasSize = it }
                 // Observe touches on the Initial pass without consuming, so InProgressStrokes
                 // still receives every event
                 .pointerInput(Unit) {
@@ -165,12 +177,9 @@ fun DrawingScreen() {
                                 stroke.enqueueInputs(batch, MutableStrokeInputBatch())
                                 stroke.updateShape(elapsed)
                             }
-                            // Stream this point live to other screens.
+                            // Queue this point for the next live batch (0..1 coordinates).
                             liveRelayId[0]?.let { id ->
-                                relay.streamPoints(
-                                    id,
-                                    listOf(StrokeRelay.StreamPoint(pos.x, pos.y, elapsed, null)),
-                                )
+                                relay.streamPoints(id, listOf(toProtocolPoint(pos.x, pos.y, elapsed, size)))
                             }
                             lastPos = pos
                         }
@@ -188,7 +197,10 @@ fun DrawingScreen() {
                                         val stroke = InProgressStroke().apply { start(latestBrush) }
                                         // Start streaming this finger stroke live. Begin
                                         // before the first point so points have a target id.
-                                        liveRelayId[0] = relay.beginStroke(latestBrush)
+                                        liveRelayId[0] = relay.beginStroke(
+                                            color = Color(latestBrush.colorIntArgb).toHex(),
+                                            size = sizeLevelFor(latestBrush.size),
+                                        )
                                         addInput(stroke, change.position, change.uptimeMillis)
                                         liveStroke = stroke
                                         loupeFocus = change.position
@@ -230,12 +242,25 @@ fun DrawingScreen() {
                             strokeToScreenTransform = identityMatrix
                         )
                     }
-                    remoteStrokes.values.forEach { stroke ->
-                        canvasStrokeRenderer.draw(
-                            stroke = stroke,
-                            canvas = composeCanvas.nativeCanvas,
-                            strokeToScreenTransform = identityMatrix
-                        )
+                    remoteStrokes.forEach { remote ->
+                        val cached = remoteInkCache[remote.strokeId]
+                        val ink = if (cached != null && cached.pointCount == remote.points.size &&
+                            cached.canvas == canvasSize
+                        ) {
+                            cached.stroke
+                        } else {
+                            remote.toInkStroke(canvasSize).also {
+                                remoteInkCache[remote.strokeId] =
+                                    RemoteInk(remote.points.size, canvasSize, it)
+                            }
+                        }
+                        ink?.let { stroke ->
+                            canvasStrokeRenderer.draw(
+                                stroke = stroke,
+                                canvas = composeCanvas.nativeCanvas,
+                                strokeToScreenTransform = identityMatrix
+                            )
+                        }
                     }
                 }
             }
@@ -251,13 +276,18 @@ fun DrawingScreen() {
                 )},
                 onStrokesFinished = { newStrokes ->
                     finishedStrokes = finishedStrokes + newStrokes
-                    // Finger strokes were already streamed live (begin/points/end) from the
-                    // manual path above, so re-sending them here would duplicate them on
-                    // other screens (and in the server snapshot). The finger path uses
-                    // TOUCH input; stylus/eraser strokes are NOT streamed live, so send
-                    // only those, as a single legacy full-stroke frame.
+                    // Finger strokes were already streamed live from the manual path above,
+                    // so re-sending them here would duplicate them on other screens (and in
+                    // the server snapshot). The finger path uses TOUCH input; stylus/eraser
+                    // strokes are NOT streamed live, so send only those, as one finished batch.
                     newStrokes.forEach { stroke ->
-                        if (!wasStreamedLive(stroke)) relay.sendStrokeComplete(stroke)
+                        if (!wasStreamedLive(stroke)) {
+                            relay.sendWholeStroke(
+                                color = Color(stroke.brush.colorIntArgb).toHex(),
+                                size = sizeLevelFor(stroke.brush.size),
+                                points = stroke.toProtocolPoints(canvasSize),
+                            )
+                        }
                     }
                 }
             )
@@ -291,36 +321,8 @@ private fun wasStreamedLive(stroke: Stroke): Boolean {
     return inputs.get(0).toolType == InputToolType.TOUCH
 }
 
-/**
- * Accumulates the points of a remote stroke as they stream in and rebuilds a [Stroke]
- * so it can be rendered live. Ink rejects duplicate consecutive inputs and empty
- * batches, so [buildOrNull] returns null until there is something drawable.
- */
-private class RemoteStrokeBuilder(private val brush: Brush) {
-    private val batch = MutableStrokeInputBatch()
-    private var lastX = Float.NaN
-    private var lastY = Float.NaN
+/** A remote stroke's ink, plus what it was built from, so it is only rebuilt on change. */
+private class RemoteInk(val pointCount: Int, val canvas: IntSize, val stroke: Stroke?)
 
-    fun addAll(incoming: MutableStrokeInputBatch) {
-        for (i in 0 until incoming.size) {
-            val input = incoming.get(i)
-            if (input.x == lastX && input.y == lastY) continue
-            runCatching {
-                batch.add(
-                    type = InputToolType.TOUCH,
-                    x = input.x,
-                    y = input.y,
-                    elapsedTimeMillis = input.elapsedTimeMillis,
-                    pressure = input.pressure,
-                )
-                lastX = input.x
-                lastY = input.y
-            }
-        }
-    }
-
-    fun buildOrNull(): Stroke? {
-        if (batch.size == 0) return null
-        return runCatching { Stroke(brush, batch) }.getOrNull()
-    }
-}
+private fun ServerMessage.Stroke.toRemoteStroke() =
+    RemoteStroke(strokeId, color, size, points, done)

@@ -1,10 +1,10 @@
 # inklings-server — stroke relay
 
 A minimal Ktor server that relays drawing strokes between Inklings apps.
-Whatever one connected client sends to `/relay`, every *other* connected client receives.
-Strokes now **stream live** (begin → points → end) so screens watch a drawing appear as
-it happens, and the server keeps the current canvas so a client that joins late is caught
-up with a snapshot. See "Live-streaming protocol" below.
+Phones and the server speak **protocol v0** (`../protocol/src/it/inkorporate/protocol/Protocol.kt`,
+the only copy, compiled by both the app and this server). Strokes stream live in ~50 ms
+batches, and the server keeps the current canvas so a phone that joins late is caught up
+with a `canvas_snapshot`. See "Drawing messages" below.
 
 This folder is its **own Gradle build** (own wrapper, own versions: Ktor 3.6.1, Kotlin from
 `gradle/libs.versions.toml`). It is *not* part of the Android app's build, so the two can use different versions.
@@ -34,51 +34,45 @@ This folder is its **own Gradle build** (own wrapper, own versions: Ktor 3.6.1, 
 
 ## Testing without a second phone
 - **Relay Pad** — open `tools/relay-pad.html` in a browser while the server runs. It acts as a second
-  phone (1080×2170 canvas, same pixel coordinates as a 1080×2400 phone): strokes drawn in the app show up there,
+  phone (1080×2170 canvas, the same shape as the emulator's drawing area, so nothing stretches): strokes drawn in the app show up there,
   and strokes drawn there show up in the app. It draws plain lines, not ink, so brushes look simpler.
 - **Browser console** — at http://localhost:8080, press F12 → Console:
   ```js
-  let last; const ws = new WebSocket("ws://localhost:8080/relay"); ws.onmessage = e => { last = e.data; console.log(e.data) }
+  const ws = new WebSocket("ws://localhost:8080/relay"); ws.onmessage = e => console.log(e.data)
   ```
-  Draw in the app → its JSON prints. Send a red, shifted copy back:
+  Draw in the app → its `stroke` batches print. Send a red line back into the app:
   ```js
-  const s = JSON.parse(last); s.color = 0xFFE53935 | 0; s.points.forEach(p => p.x += 200); ws.send(JSON.stringify(s))
+  ws.send(JSON.stringify({type:"stroke",strokeId:1,points:[[0.2,0.2,0],[0.8,0.8,200]],color:"#E53935",size:3,done:true}))
   ```
-- Two browser tabs running the first line can also chat: `ws.send("hello")` in one → appears in the other.
+- **Automated check** — `node tools/relay-test.js` (server running) checks batches, renumbering,
+  BAD_MESSAGE and the late-joiner snapshot. `node tools/relay-listen.js` prints what the app sends.
 
 ## How it works
 - `src/main/kotlin/Websockets.kt` — installs the WebSockets plugin (pings every 15 s, 15 s timeout).
 - `src/main/kotlin/Routing.kt`
   - `GET /` — "Hello, World!" health check.
   - `/ws` — echo: replies to the sender only (learning step).
-  - `/relay` — broadcast. `sessions` is a thread-safe set (`ConcurrentHashMap.newKeySet()`) of everyone
-    connected, shared by all connections. On connect: add self AND send a snapshot of the
-    current canvas. Each text frame: update canvas state, then send to every session except self.
-    `finally`: remove self (runs on errors too).
-- `src/main/kotlin/CanvasState.kt` — the server's view of the drawing, kept so late joiners
-  can be caught up. It reads only `type` and `id` from each frame and otherwise stores the raw
-  JSON, reassembling whole strokes for the snapshot. No JSON library (small, flat frames).
+  - `/relay` — broadcast. `sessions` is everyone connected (one shared canvas until rooms exist).
+    On connect: send a `canvas_snapshot`, then add self. Each message is read with the protocol's
+    `decodeClient`; a broken one gets `error` / `BAD_MESSAGE` back. `stroke`, `undo` and `clear`
+    update the canvas copy and go to every session except the sender. Other messages
+    (rooms, chat…) are ignored for now. One `Mutex` covers update + send and snapshot + join,
+    so a joiner never gets a batch twice or misses one. `finally`: remove self.
+- `src/main/kotlin/CanvasState.kt` — the server's copy of the drawing, for late joiners.
+  Gives every stroke a **server strokeId**: phones count their strokes from 1, which would
+  collide between phones (or after an app restart), so the server renumbers before relaying.
 
-### Live-streaming protocol
-JSON text frames, one message per frame, each with a `type`:
-- begin  — `{"type":"begin","id":"s1","brush":"Marker","color":<ARGB int>,"size":5.0,"epsilon":0.1}`
-- points — `{"type":"points","id":"s1","points":[{"x":..,"y":..,"t":<ms>,"p":<pressure>}, ...]}` (sent repeatedly while drawing)
-- end    — `{"type":"end","id":"s1"}`
-- clear  — `{"type":"clear"}` (wipes everyone's canvas)
-- snapshot — server → a newly connected client: `{"type":"snapshot","strokes":[<full stroke>, ...]}`
+### Drawing messages (protocol v0)
+- phone → server `stroke` — `{"type":"stroke","strokeId":1,"points":[[x,y,ms],...],"color":"#RRGGBB","size":1|2|3,"done":false}`
+  sent about every 50 ms while drawing; the last batch of a stroke has `"done":true`.
+  x and y are **0..1** (fraction of the canvas width / height), ms is time since the stroke started.
+- server → other phones `stroke` — the same batch, with the server's strokeId.
+- `undo` / `clear` — `{"type":"undo"}`, `{"type":"clear"}`, relayed to everyone else.
+- server → a phone that just connected `canvas_snapshot` — `{"type":"canvas_snapshot","strokes":[<stroke>,...]}`,
+  oldest first, each with all its points so far (`done:false` = still being drawn, more batches follow).
 
-A snapshot stroke has the begin fields plus the accumulated `points`, i.e. the same shape
-as the legacy single-frame stroke, so clients render snapshot and live strokes with one path.
-`brush` is the toolbar label (`stockBrushes` in `DrawingToolbar.kt`).
-
-**Back-compat:** a frame with no `type` but with `points` is treated as one complete stroke
-(the old single-frame protocol). The app still sends this for stylus/eraser input, which the
-finger-only live-streaming path doesn't cover.
-
-### Coordinates are NOT normalized (yet)
-Points are raw screen pixels and are rendered as-is. If two screens have different pixel
-dimensions, strokes land in the wrong place. The Relay Pad is sized 1080×2170 to match the
-emulator's pixels as a workaround. Normalizing to a device-independent space is a planned change.
+Not in the protocol, so not sent: brush type (other phones draw everything with the Pressure Pen),
+pen pressure, and transparency.
 
 ## Tested (2026-11-04)
 - Two Node clients on `/relay`: messages reach the other client, not the sender.
@@ -87,19 +81,19 @@ emulator's pixels as a workaround. Normalizing to a device-independent space is 
 - Galaxy S24 over USB ↔ emulator: strokes cross both ways, rebuilt by ink, no dropped or failed strokes.
 
 ## Known limits
-- Coordinates are raw screen pixels → different screen sizes put strokes in the wrong place
-  (same root cause as the app's rotation bug).
-- JSON only carries x, y, time, pressure (no tilt/orientation), so real-finger strokes can look different on the other device.
+- Points are a fraction of width and height separately, so a drawing **stretches** between
+  screens with a different shape. Fix: give the canvas a fixed aspect ratio in the app.
+- No rooms yet and anyone can draw (no NOT_DRAWER check). Two people drawing at once works,
+  but `undo` removes the newest stroke whoever drew it.
+- A phone that drops mid-stroke leaves that stroke unfinished (`done:false`) in the snapshot.
 - Dense vertical streaks seen on the S24 with Pressure Pen are drawn locally by the phone, not by the server — to investigate.
 - Phone in dark mode → dark canvas, black ink hard to see.
-- No reconnect; "Clear" only clears your own screen; plain `ws://` (cleartext allowed in the app manifest) — switch to `wss://` when deployed.
+- No reconnect; plain `ws://` (cleartext allowed in the app manifest) — switch to `wss://` when deployed.
 
 ## Next
-- **Normalize coordinates** so different screen sizes line up (device-independent space +
-  scale on render; also scale brush `size`). This is the next planned change.
-- Live-stream **stylus/eraser** input too (currently only finger strokes stream live).
-- Rooms (`/room/{id}`), typed messages (`sealed class` + kotlinx.serialization),
-  first game rule (only the drawer may draw), deploy (fat JAR / Docker, then `wss://`).
+- Rooms (`create_room` / `join_room`, one canvas per room), only the drawer may draw.
+- Fixed canvas aspect ratio in the app; an undo button.
+- Deploy (fat JAR / Docker, then `wss://`).
 
 ## Gotchas
 - **Terminal Gradle needs a full JDK 21**, not a JRE. If `./gradlew run` complains, point `JAVA_HOME` at a JDK

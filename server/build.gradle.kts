@@ -1,6 +1,7 @@
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.serialization)
     alias(ktorLibs.plugins.ktor)
 }
 
@@ -13,6 +14,9 @@ application {
 
 kotlin {
     jvmToolchain(21)
+    // The shared message protocol lives in ../protocol so the app and the
+    // server compile the exact same file.
+    sourceSets["main"].kotlin.srcDir("../protocol/src")
 }
 dependencies {
     implementation(ktorLibs.server.config.yaml)
@@ -20,6 +24,7 @@ dependencies {
     implementation(ktorLibs.server.netty)
     implementation(ktorLibs.server.websockets)
     implementation(libs.logback.classic)
+    implementation(libs.kotlinx.serialization.json)
 
     testImplementation(kotlin("test"))
     testImplementation(ktorLibs.server.testHost)

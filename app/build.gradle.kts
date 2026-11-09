@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -37,6 +38,11 @@ android {
     buildFeatures {
         compose = true
     }
+    // The shared message protocol lives in ../protocol so the app and the
+    // server compile the exact same file.
+    sourceSets {
+        getByName("main").java.srcDir("../protocol/src")
+    }
 }
 
 dependencies {
@@ -59,6 +65,8 @@ dependencies {
 
     // WebSocket client for the stroke relay server
     implementation(libs.okhttp)
+    // JSON for the shared protocol (protocol/src)
+    implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

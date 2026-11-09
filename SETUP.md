@@ -176,7 +176,7 @@ Device Manager → Edit → Show Advanced Settings → Graphics: **Software**.
   [`server/NOTES.md`](server/NOTES.md).
 - Optional protocol tests (need Node.js), run from `server/`:
   ```bash
-  node tools/relay-test.js      # verifies live streaming + late-joiner snapshot
+  node tools/relay-test.js      # verifies protocol v0 strokes + late-joiner snapshot
   node tools/relay-listen.js    # prints frames crossing the relay while you draw
   ```
 - Server port is set in `server/src/main/resources/application.yaml`. If you change it,

@@ -38,13 +38,13 @@ import androidx.compose.ui.unit.dp
 import androidx.ink.brush.BrushFamily
 import androidx.ink.brush.StockBrushes
 
-data class BrushSize(val label: String, val size: Float)
+/** [level] is the size sent over the network: protocol v0 allows 1, 2 or 3. */
+data class BrushSize(val label: String, val size: Float, val level: Int)
 
 val brushSizes = listOf(
-    BrushSize("Fine", 2f),
-    BrushSize("Medium", 5f),
-    BrushSize("Thick", 10f),
-    BrushSize("Bold", 18f),
+    BrushSize("Fine", 2f, level = 1),
+    BrushSize("Medium", 5f, level = 2),
+    BrushSize("Thick", 10f, level = 3),
 )
 
 val brushColors = listOf(

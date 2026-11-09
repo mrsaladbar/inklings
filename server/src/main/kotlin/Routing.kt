@@ -5,18 +5,26 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
+import it.inkorporate.protocol.ClientMessage
+import it.inkorporate.protocol.ErrorCode
+import it.inkorporate.protocol.ServerMessage
+import it.inkorporate.protocol.decodeClient
+import it.inkorporate.protocol.encodeServer
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 fun Application.configureRouting() {
-    // Everyone currently connected to /relay. Lives outside routing { } so every
-    // connection shares the same set. Thread-safe because clients join/leave concurrently.
-    val sessions = ConcurrentHashMap.newKeySet<DefaultWebSocketServerSession>()
+    // Everyone currently connected to /relay. For now this is one shared canvas; rooms
+    // (join_room etc.) will replace it with one canvas per room.
+    val sessions = LinkedHashSet<DefaultWebSocketServerSession>()
 
-    // Shared canvas state so late joiners can be caught up. The server treats every
-    // message as opaque JSON except for the small `type` field it needs to maintain
-    // this state. See CanvasState for the live-streaming protocol.
+    // The server's copy of the canvas, for catching up late joiners.
     val canvas = CanvasState()
+
+    // One lock around "update the canvas + send to everyone" and "send a snapshot + join".
+    // Without it, a joiner could get a batch both inside its snapshot and again as a live
+    // message, or miss one between the two.
+    val lock = Mutex()
 
     routing {
         get("/") {
@@ -35,42 +43,62 @@ fun Application.configureRouting() {
             println("client left");
         }
 
-        // Live-streaming relay.
+        // Drawing relay, protocol v0 (protocol/src/it/inkorporate/protocol/Protocol.kt).
         //
-        // Clients exchange small JSON text frames that describe a drawing as it happens:
-        //   {"type":"begin","id":..,"brush":..,"color":..,"size":..,"epsilon":..}
-        //   {"type":"points","id":..,"points":[{x,y,t,p?},..]}   (sent repeatedly while drawing)
-        //   {"type":"end","id":..}
-        //   {"type":"clear"}
-        // Back-compat: a message with no "type" that has "points" is treated as one
-        // complete stroke (the old single-frame protocol).
-        //
+        // Phones send `stroke` (in ~50 ms batches, last one done = true), `undo` and `clear`.
         // The server:
-        //   1. updates `canvas` so it always knows the current drawing, then
-        //   2. forwards the raw frame to every OTHER client (unchanged bytes), and
-        //   3. on connect, sends the new client a {"type":"snapshot","strokes":[..]}
-        //      so a late joiner immediately sees everything drawn so far, including
-        //      strokes still in progress.
+        //   1. on connect, sends the new phone a `canvas_snapshot` of everything drawn so far
+        //      (including strokes still being drawn),
+        //   2. updates its canvas copy, then
+        //   3. relays the message to every OTHER phone. Strokes are relayed under a
+        //      server-assigned strokeId so ids never collide between phones.
+        //
+        // Not yet: rooms, and only letting the current drawer draw (NOT_DRAWER).
         webSocket("/relay") {
-            sessions += this
-            println("relay: joined, ${sessions.size} connected")
+            // This phone's strokeId -> server strokeId, for strokes it is still drawing.
+            val idMap = HashMap<Int, Int>()
 
-            // Catch the new client up with the current canvas before anything else.
-            send(Frame.Text(canvas.snapshotJson()))
+            lock.withLock {
+                send(Frame.Text(encodeServer(canvas.snapshot())))
+                sessions += this
+                println("relay: joined, ${sessions.size} connected")
+            }
 
             try {
                 for (frame in incoming) {
-                    if (frame is Frame.Text) {
-                        val text = frame.readText()
-                        canvas.apply(text)
+                    if (frame !is Frame.Text) continue
+                    val text = frame.readText()
+                    val msg = runCatching { decodeClient(text) }.getOrElse {
+                        send(Frame.Text(encodeServer(
+                            ServerMessage.Error(ErrorCode.BAD_MESSAGE, "Could not read: ${it.message}")
+                        )))
+                        continue
+                    }
+
+                    lock.withLock {
+                        val relay: ServerMessage = when (msg) {
+                            is ClientMessage.Stroke -> {
+                                val serverId = idMap.getOrPut(msg.strokeId) { canvas.newStrokeId() }
+                                if (msg.done) idMap.remove(msg.strokeId)
+                                canvas.addBatch(serverId, msg)
+                            }
+                            ClientMessage.Undo -> ServerMessage.Undo.also { canvas.undo() }
+                            ClientMessage.Clear -> ServerMessage.Clear.also { canvas.clear() }
+                            // Rooms, turns and guessing are other people's pieces; ignore for now.
+                            else -> {
+                                println("relay: not handled yet: $msg")
+                                return@withLock
+                            }
+                        }
+                        val out = encodeServer(relay)
                         for (other in sessions) {
-                            if (other != this) other.send(Frame.Text(text))
+                            if (other != this) runCatching { other.send(Frame.Text(out)) }
                         }
                     }
                 }
             } finally {
                 // Runs on normal disconnect AND on errors, so dead sessions never pile up.
-                sessions -= this
+                lock.withLock { sessions -= this }
                 println("relay: left, ${sessions.size} connected")
             }
         }

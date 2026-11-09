@@ -1,5 +1,5 @@
 // Connects to /relay and prints every frame it receives for a few seconds.
-// Used to confirm the Android app streams begin/points/end live when you draw.
+// Used to confirm the Android app streams protocol v0 `stroke` batches live when you draw.
 const net = require("net");
 const crypto = require("crypto");
 const s = net.connect(8080, "127.0.0.1", () => {
@@ -11,7 +11,8 @@ const s = net.connect(8080, "127.0.0.1", () => {
 });
 let hs = false,
   buf = Buffer.alloc(0);
-const counts = { begin: 0, points: 0, end: 0, snapshot: 0, other: 0 };
+const counts = { stroke: 0, canvas_snapshot: 0, other: 0 };
+let doneSeen = 0;
 s.on("data", (c) => {
   buf = Buffer.concat([buf, c]);
   if (!hs) {
@@ -39,7 +40,9 @@ s.on("data", (c) => {
     if (op === 0x1) {
       let t = "other";
       try {
-        t = JSON.parse(payload).type || "other";
+        const m = JSON.parse(payload);
+        t = m.type || "other";
+        if (t === "stroke" && m.done) doneSeen++;
       } catch {}
       counts[t] = (counts[t] || 0) + 1;
       const short = payload.length > 90 ? payload.slice(0, 90) + "…" : payload;
@@ -49,7 +52,7 @@ s.on("data", (c) => {
 });
 setTimeout(() => {
   console.log("\ncounts:", JSON.stringify(counts));
-  const live = counts.begin > 0 && counts.points > 0 && counts.end > 0;
-  console.log(live ? "PASS: app streamed a live stroke (begin+points+end)" : "no live stroke seen");
+  const live = counts.stroke > 1 && doneSeen > 0;
+  console.log(live ? `PASS: app streamed live strokes (${counts.stroke} batches, ${doneSeen} finished)` : "no live stroke seen");
   process.exit(0);
 }, Number(process.env.LISTEN_MS || 8000));
