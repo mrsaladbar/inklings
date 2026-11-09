@@ -149,8 +149,35 @@ class StrokeRelay(
         return id
     }
 
-    /** Stream one or more new points for an in-progress local stroke. */
+    /**
+     * Queue new points for an in-progress local stroke. Points are not sent one by one:
+     * they collect in [pendingPoints] and go out as one `points` message every
+     * [BATCH_INTERVAL_MS]. Call on the main thread (the flush runs there too).
+     */
     fun streamPoints(id: String, points: List<StreamPoint>) {
+        if (points.isEmpty()) return
+        pendingPoints.getOrPut(id) { ArrayList() }.addAll(points)
+        if (!flushScheduled) {
+            flushScheduled = true
+            mainThread.postDelayed(flushRunnable, BATCH_INTERVAL_MS)
+        }
+    }
+
+    // Points waiting for the next batch, per stroke id. Only touched on the main thread.
+    private val pendingPoints = LinkedHashMap<String, MutableList<StreamPoint>>()
+    private var flushScheduled = false
+    private val flushRunnable = Runnable {
+        flushScheduled = false
+        flushAll()
+    }
+
+    private fun flushAll() {
+        for (id in pendingPoints.keys.toList()) flush(id)
+    }
+
+    /** Send whatever is queued for [id] as one `points` message. */
+    private fun flush(id: String) {
+        val points = pendingPoints.remove(id) ?: return
         if (points.isEmpty()) return
         val arr = JSONArray()
         for (p in points) {
@@ -171,6 +198,8 @@ class StrokeRelay(
 
     /** Finish an in-progress local stroke. */
     fun endStroke(id: String) {
+        // Send the last partial batch first, so `end` never arrives before its points.
+        flush(id)
         sendRaw(JSONObject().apply { put("type", "end"); put("id", id) }.toString())
     }
 
@@ -198,12 +227,18 @@ class StrokeRelay(
     }
 
     fun close() {
+        mainThread.removeCallbacks(flushRunnable)
+        flushScheduled = false
+        flushAll()
         socket?.close(1000, "screen closed")
         socket = null
     }
 
     companion object {
         private const val TAG = "StrokeRelay"
+
+        /** How often queued live points are sent, in ms. Matches protocol v0's ~50 ms. */
+        const val BATCH_INTERVAL_MS = 50L
 
         /** Sentinel for an `end` with no inline stroke; the receiver rebuilds from points. */
         private val EMPTY_SENTINEL: Stroke by lazy {
